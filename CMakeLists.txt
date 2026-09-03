@@ -220,19 +220,21 @@ if(OMPNN_BUILD_PYTHON)
     INSTALL_RPATH "$ORIGIN")
   # LLVM-based compilers keep their OpenMP runtime next to the compiler (clang-18:
   # /usr/lib/llvm-18/lib, amdclang++: /opt/rocm/lib/llvm/lib): carry it as rpath
-  execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libomp.so
-    OUTPUT_VARIABLE _libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-  if(NOT (_libomp AND IS_ABSOLUTE "${_libomp}" AND EXISTS "${_libomp}"))
-    # Ubuntu's clang-18 does not resolve the name: look next to the compiler
-    # (<prefix>/bin/clang++ -> <prefix>/lib/libomptarget.so)
-    get_filename_component(_cxx_real "${CMAKE_CXX_COMPILER}" REALPATH)
-    get_filename_component(_cxx_bin "${_cxx_real}" DIRECTORY)
-    foreach(_cand "${_cxx_bin}/../lib/libomptarget.so" "${_cxx_bin}/../lib/libomp.so")
-      if(EXISTS "${_cand}")
-        get_filename_component(_libomp "${_cand}" REALPATH)
-        break()
-      endif()
-    endforeach()
+  # The compiler's own lib dir first (<prefix>/bin/clang++ -> <prefix>/lib): with
+  # several LLVM versions installed, clang-18's -print-file-name=libomp.so resolves
+  # to the system libomp of another version, where libomptarget.so.18 is not.
+  set(_libomp "")
+  get_filename_component(_cxx_real "${CMAKE_CXX_COMPILER}" REALPATH)
+  get_filename_component(_cxx_bin "${_cxx_real}" DIRECTORY)
+  foreach(_cand "${_cxx_bin}/../lib/libomptarget.so" "${_cxx_bin}/../lib/libomp.so")
+    if(EXISTS "${_cand}")
+      get_filename_component(_libomp "${_cand}" REALPATH)
+      break()
+    endif()
+  endforeach()
+  if(NOT _libomp)
+    execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libomp.so
+      OUTPUT_VARIABLE _libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
   endif()
   if(_libomp AND IS_ABSOLUTE "${_libomp}" AND EXISTS "${_libomp}")
     get_filename_component(_libomp_dir "${_libomp}" DIRECTORY)
