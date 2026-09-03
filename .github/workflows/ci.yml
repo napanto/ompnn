@@ -1,0 +1,48 @@
+name: ci
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  cpu:
+    name: host build + parity suite (${{ matrix.cxx }}, ${{ matrix.blas }})
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/napanto/fnn-cuda:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cxx: g++-14, blas: openblas, root: /opt/openblas-openmp }
+          - { cxx: clang++-22, blas: openblas, root: /opt/openblas-openmp }
+          - { cxx: g++-14, blas: mkl, root: /opt/venv }
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          export CXX=${{ matrix.cxx }} OMPNN_BLAS=${{ matrix.blas }} OMPNN_BLAS_ROOT=${{ matrix.root }} CMAKE_BUILD_PARALLEL_LEVEL=4
+          pip install -v .
+          pip install "fnn-testkit @ git+https://github.com/napanto/fnn-bench#subdirectory=testkit"
+          OMP_NUM_THREADS=4 pytest -q --device cpu --junitxml=junit-${{ matrix.cxx }}-${{ matrix.blas }}.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: junit-${{ matrix.cxx }}-${{ matrix.blas }}
+          path: junit-*.xml
+
+  offload-compile:
+    name: nvptx offload compile (${{ matrix.cxx }}, no GPU on the runner)
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/napanto/fnn-cuda:latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++-14, clang++-18]
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          export CXX=${{ matrix.cxx }} OMPNN_TARGET=nvidia OMPNN_OFFLOAD_ARCH="sm_61;sm_80" OMPNN_BLAS_ROOT=/opt/openblas-openmp CMAKE_BUILD_PARALLEL_LEVEL=4
+          pip install -v .
+          python -c "import ompnn; print(ompnn.build_info()); print(ompnn.devices())"
