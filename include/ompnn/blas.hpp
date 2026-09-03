@@ -153,23 +153,59 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
             for (int ti = 0; ti < tiles_m; ++ti) {
 #pragma omp parallel num_threads(TILE * TILE) shared(As, Bs)
                 {
-                    const int tid = omp_get_thread_num();
-                    const int li = tid % TILE, lj = tid / TILE;
-                    const int i = ti * TILE + li, j = tj * TILE + lj;
-                    T acc = T(0);
-                    for (int t = 0; t < k; t += TILE) {
-                        int p = t + lj;
-                        As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
-                        p = t + li;
-                        Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
+                    const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
+                    if (nt == TILE * TILE) {
+                        // one thread per C element (clang, nvc++): the accumulator stays in a register
+                        const int li = tid % TILE, lj = tid / TILE;
+                        const int i = ti * TILE + li, j = tj * TILE + lj;
+                        T acc = T(0);
+                        for (int t = 0; t < k; t += TILE) {
+                            int p = t + lj;
+                            As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                            p = t + li;
+                            Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
 #pragma omp barrier
-                        for (int kk = 0; kk < TILE; ++kk)
-                            acc += As[li][kk] * Bs[kk][lj];
+                            for (int kk = 0; kk < TILE; ++kk)
+                                acc += As[li][kk] * Bs[kk][lj];
 #pragma omp barrier
-                    }
-                    if (i < m && j < n) {
-                        T *cc = c + i + std::size_t(j) * ldc;
-                        *cc = (beta == T(0)) ? alpha * acc : alpha * acc + beta * (*cc);
+                        }
+                        if (i < m && j < n) {
+                            T *cc = c + i + std::size_t(j) * ldc;
+                            *cc = (beta == T(0)) ? alpha * acc : alpha * acc + beta * (*cc);
+                        }
+                    } else {
+                        // fewer threads than tile elements (gcc maps a thread to a wavefront and
+                        // clamps the team to 16 of them): each thread strides over the elements
+                        T acc[TILE * TILE];
+                        for (int r = 0; r < TILE * TILE; ++r)
+                            acc[r] = T(0);
+                        for (int t = 0; t < k; t += TILE) {
+                            for (int e = tid; e < TILE * TILE; e += nt) {
+                                const int li = e % TILE, lj = e / TILE;
+                                const int i = ti * TILE + li, j = tj * TILE + lj;
+                                int p = t + lj;
+                                As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                                p = t + li;
+                                Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
+                            }
+#pragma omp barrier
+                            for (int e = tid, r = 0; e < TILE * TILE; e += nt, ++r) {
+                                const int li = e % TILE, lj = e / TILE;
+                                T s = T(0);
+                                for (int kk = 0; kk < TILE; ++kk)
+                                    s += As[li][kk] * Bs[kk][lj];
+                                acc[r] += s;
+                            }
+#pragma omp barrier
+                        }
+                        for (int e = tid, r = 0; e < TILE * TILE; e += nt, ++r) {
+                            const int li = e % TILE, lj = e / TILE;
+                            const int i = ti * TILE + li, j = tj * TILE + lj;
+                            if (i < m && j < n) {
+                                T *cc = c + i + std::size_t(j) * ldc;
+                                *cc = (beta == T(0)) ? alpha * acc[r] : alpha * acc[r] + beta * (*cc);
+                            }
+                        }
                     }
                 }
             }

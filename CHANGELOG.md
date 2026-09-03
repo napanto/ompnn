@@ -37,6 +37,11 @@ layout and numerics.
 - The OpenMP device number is checked against the CUDA/HIP ordinal of a probe
   allocation at construction (`HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`
   can disagree); mismatch raises.
+- Known numerical differences vs syclnn (within the parity tolerances):
+  `sumsq` accumulates in double, the host tiled GEMM reassociates the 16-term
+  partial sums (`simd reduction`), and gcc offload builds run the `omp atomic`
+  loss and the serial bias gradient at one lane per wavefront (those two
+  ablation rows are not compared with SYCL/CUDA).
 - Build: `OMPNN_TARGET=cpu|nvidia|amd`, `OMPNN_OFFLOAD_ARCH`, `OMPNN_BLAS`,
   per-compiler offload flags (clang `-fopenmp-targets`/`--offload-arch`, gcc
   `-foffload`, nvc++ `-mp=gpu`), `build_info()` with compiler / flags / target /
