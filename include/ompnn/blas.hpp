@@ -30,7 +30,7 @@ namespace ompnn {
 #endif
 
 inline std::vector<std::string> compiled_blas_backends() {
-    std::vector<std::string> v{OMPNN_BLAS_NAME, "omp"};
+    std::vector<std::string> v{OMPNN_BLAS_NAME, "omp", "tiled"};
 #if defined(OMPNN_TARGET_NVIDIA)
     v.push_back("cublas");
 #elif defined(OMPNN_TARGET_AMD)
@@ -39,13 +39,15 @@ inline std::vector<std::string> compiled_blas_backends() {
     return v;
 }
 
-enum class BlasKind { Auto, Cblas, Omp, Vendor };
+enum class BlasKind { Auto, Cblas, Omp, Tiled, Vendor };
 
 inline BlasKind parse_blas(const std::string &name) {
     if (name.empty() || name == "auto")
         return BlasKind::Auto;
     if (name == "omp" || name == "openmp")
         return BlasKind::Omp;
+    if (name == "tiled" || name == "handwritten")
+        return BlasKind::Tiled;
     if (name == "openblas" || name == "mkl" || name == "mklcpu" || name == "netlib" || name == "cblas") {
         if (name != "cblas" && name != OMPNN_BLAS_NAME && !(name == "mklcpu" && std::string(OMPNN_BLAS_NAME) == "mkl") &&
             !(name == "netlib" && std::string(OMPNN_BLAS_NAME) == "openblas"))
@@ -122,6 +124,93 @@ inline void gemm(bool gpu, int dev, bool ta, bool tb, int m, int n, int k, T alp
         }
     }
 }
+/// The 16x16 tiled GEMM (same tile as syclnn's local-memory and cudann's
+/// shared-memory versions): one team per C tile, team-shared tiles of op(A) and
+/// op(B) refilled every 16 k-steps by a parallel loop, the team's threads each
+/// own one C element.  On the host the same loop nest runs with the tiles in
+/// the cache.
+constexpr int TILE = 16;
+#define OMPNN_PRAGMA_(x) _Pragma(#x)
+#define OMPNN_PRAGMA(x) OMPNN_PRAGMA_(x)
+#if defined(__clang__)
+#define OMPNN_PTEAM_CLAUSES uses_allocators(omp_pteam_mem_alloc)
+#else
+#define OMPNN_PTEAM_CLAUSES
+#endif
+template <typename T>
+inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k, T alpha, const T *a, int lda, const T *b,
+                       int ldb, T beta, T *c, int ldc) {
+    const int tiles_m = (m + TILE - 1) / TILE, tiles_n = (n + TILE - 1) / TILE;
+    if (gpu) {
+        // one team per C tile, one parallel region per team: the TILE*TILE threads each
+        // own a C element and keep the accumulator in a register; the op(A)/op(B) tiles
+        // live in the team's low-latency memory (omp_pteam_mem_alloc = shared memory / LDS)
+        T As[TILE][TILE], Bs[TILE][TILE];
+        // clang requires the predefined allocator to be listed in uses_allocators, gcc 14 rejects the clause
+        OMPNN_PRAGMA(omp target teams distribute collapse(2) device(dev) is_device_ptr(a, b, c) thread_limit(256)
+                         OMPNN_PTEAM_CLAUSES private(As, Bs) allocate(omp_pteam_mem_alloc : As, Bs))
+        for (int tj = 0; tj < tiles_n; ++tj) {
+            for (int ti = 0; ti < tiles_m; ++ti) {
+#pragma omp parallel num_threads(TILE * TILE) shared(As, Bs)
+                {
+                    const int tid = omp_get_thread_num();
+                    const int li = tid % TILE, lj = tid / TILE;
+                    const int i = ti * TILE + li, j = tj * TILE + lj;
+                    T acc = T(0);
+                    for (int t = 0; t < k; t += TILE) {
+                        int p = t + lj;
+                        As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                        p = t + li;
+                        Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
+#pragma omp barrier
+                        for (int kk = 0; kk < TILE; ++kk)
+                            acc += As[li][kk] * Bs[kk][lj];
+#pragma omp barrier
+                    }
+                    if (i < m && j < n) {
+                        T *cc = c + i + std::size_t(j) * ldc;
+                        *cc = (beta == T(0)) ? alpha * acc : alpha * acc + beta * (*cc);
+                    }
+                }
+            }
+        }
+    } else {
+        // cache-tiled host version, Bs stored transposed so the k loop is contiguous
+#pragma omp parallel for collapse(2)
+        for (int tj = 0; tj < tiles_n; ++tj) {
+            for (int ti = 0; ti < tiles_m; ++ti) {
+                T As[TILE][TILE], BsT[TILE][TILE], Cs[TILE][TILE] = {};
+                for (int t = 0; t < k; t += TILE) {
+                    for (int lj = 0; lj < TILE; ++lj)
+                        for (int li = 0; li < TILE; ++li) {
+                            const int i = ti * TILE + li, j = tj * TILE + lj;
+                            int p = t + lj;
+                            As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                            p = t + li;
+                            BsT[lj][li] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
+                        }
+                    for (int lj = 0; lj < TILE; ++lj)
+                        for (int li = 0; li < TILE; ++li) {
+                            T acc = Cs[li][lj];
+#pragma omp simd reduction(+ : acc)
+                            for (int kk = 0; kk < TILE; ++kk)
+                                acc += As[li][kk] * BsT[lj][kk];
+                            Cs[li][lj] = acc;
+                        }
+                }
+                for (int lj = 0; lj < TILE; ++lj)
+                    for (int li = 0; li < TILE; ++li) {
+                        const int i = ti * TILE + li, j = tj * TILE + lj;
+                        if (i < m && j < n) {
+                            T *cc = c + i + std::size_t(j) * ldc;
+                            *cc = (beta == T(0)) ? alpha * Cs[li][lj] : alpha * Cs[li][lj] + beta * (*cc);
+                        }
+                    }
+            }
+        }
+    }
+}
+
 template <typename T>
 inline void gemv(bool gpu, int dev, bool ta, int m, int n, T alpha, const T *a, int lda, const T *x, T beta, T *y) {
     const int rows = ta ? n : m, inner = ta ? m : n;

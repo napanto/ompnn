@@ -48,10 +48,11 @@ namespace ompnn {
 // amdgcn offloading rejects most of them), functors from activations.hpp only.
 namespace kernels {
 
+/// `tl`: thread_limit of the target teams (Options::workgroup_size, default 256).
 template <typename T, typename F>
-inline void activate(bool gpu, int dev, T *net, T *out, const T *bias, std::size_t n, std::size_t M, F f) {
+inline void activate(bool gpu, int dev, int tl, T *net, T *out, const T *bias, std::size_t n, std::size_t M, F f) {
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(net, out, bias)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(net, out, bias) firstprivate(f)
         for (std::size_t i = 0; i < n; ++i) {
             const T z = net[i] + bias[i % M];
             net[i] = z;
@@ -69,12 +70,12 @@ inline void activate(bool gpu, int dev, T *net, T *out, const T *bias, std::size
 
 /// delta = (t - o) f'(net); returns sum 0.5 (t - o)^2 (reduction, or one atomic per element)
 template <typename T, typename D>
-inline double output_delta_loss(bool gpu, int dev, bool reduction, const T *targets, const T *out, const T *net, T *delta,
-                                std::size_t n, D df) {
+inline double output_delta_loss(bool gpu, int dev, int tl, bool reduction, const T *targets, const T *out, const T *net,
+                                T *delta, std::size_t n, D df) {
     double loss = 0.0;
     if (reduction) {
         if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(targets, out, net, delta) reduction(+ : loss) map(tofrom : loss)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(targets, out, net, delta) firstprivate(df) reduction(+ : loss) map(tofrom : loss)
             for (std::size_t i = 0; i < n; ++i) {
                 const T o = out[i];
                 const T e = targets[i] - o;
@@ -97,7 +98,7 @@ inline double output_delta_loss(bool gpu, int dev, bool reduction, const T *targ
     // 0.1-style: one atomic add on a single scalar of type T per element
     T acc = T(0);
     if (gpu) {
-#pragma omp target teams distribute parallel for device(dev) is_device_ptr(targets, out, net, delta) map(tofrom : acc)
+#pragma omp target teams distribute parallel for device(dev) thread_limit(tl) is_device_ptr(targets, out, net, delta) firstprivate(df) map(tofrom : acc)
         for (std::size_t i = 0; i < n; ++i) {
             const T o = out[i];
             const T e = targets[i] - o;
@@ -121,9 +122,9 @@ inline double output_delta_loss(bool gpu, int dev, bool reduction, const T *targ
 }
 
 template <typename T, typename D>
-inline void hidden_delta(bool gpu, int dev, T *delta, const T *out, const T *net, std::size_t n, D df) {
+inline void hidden_delta(bool gpu, int dev, int tl, T *delta, const T *out, const T *net, std::size_t n, D df) {
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(delta, out, net)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(delta, out, net) firstprivate(df)
         for (std::size_t i = 0; i < n; ++i)
             delta[i] *= df(out[i], net[i]);
     } else {
@@ -134,9 +135,9 @@ inline void hidden_delta(bool gpu, int dev, T *delta, const T *out, const T *net
 }
 
 /// gb[j] = sum_n delta[j + M n] / B (0.1: one work-item per output neuron)
-template <typename T> inline void bias_grad(bool gpu, int dev, const T *delta, T *gb, std::size_t M, std::size_t B) {
+template <typename T> inline void bias_grad(bool gpu, int dev, int tl, const T *delta, T *gb, std::size_t M, std::size_t B) {
     if (gpu) {
-#pragma omp target teams distribute parallel for device(dev) is_device_ptr(delta, gb)
+#pragma omp target teams distribute parallel for device(dev) thread_limit(tl) is_device_ptr(delta, gb)
         for (std::size_t j = 0; j < M; ++j) {
             T s = T(0);
             for (std::size_t n = 0; n < B; ++n)
@@ -206,11 +207,11 @@ template <typename T> inline void step_fn(T &p, T grad, T reg_grad, T &m, T &v, 
 
 /// One fused loop over the weights and biases of one layer.
 template <typename T>
-inline void update(bool gpu, int dev, T *W, const T *gW, T *mW, T *vW, std::size_t nw, T *b, const T *gb, T *mb, T *vb,
-                   std::size_t nb, UpdateParams<T> u) {
+inline void update(bool gpu, int dev, int tl, T *W, const T *gW, T *mW, T *vW, std::size_t nw, T *b, const T *gb, T *mb,
+                   T *vb, std::size_t nb, UpdateParams<T> u) {
     const std::size_t n = nw + nb;
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(W, gW, mW, vW, b, gb, mb, vb)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(W, gW, mW, vW, b, gb, mb, vb) firstprivate(u)
         for (std::size_t i = 0; i < n; ++i) {
             if (i < nw) {
                 const T w = W[i];
@@ -245,9 +246,9 @@ inline void update(bool gpu, int dev, T *W, const T *gW, T *mW, T *vW, std::size
 }
 
 template <typename T>
-inline void gather(bool gpu, int dev, const T *src, T *dst, const std::uint32_t *perm, std::size_t rows, std::size_t total) {
+inline void gather(bool gpu, int dev, int tl, const T *src, T *dst, const std::uint32_t *perm, std::size_t rows, std::size_t total) {
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(src, dst, perm)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(src, dst, perm)
         for (std::size_t i = 0; i < total; ++i) {
             const std::size_t c = i / rows, r = i - c * rows;
             dst[i] = src[r + rows * perm[c]];
@@ -261,9 +262,9 @@ inline void gather(bool gpu, int dev, const T *src, T *dst, const std::uint32_t 
     }
 }
 
-template <typename T> inline void fill(bool gpu, int dev, T *p, T v, std::size_t n) {
+template <typename T> inline void fill(bool gpu, int dev, int tl, T *p, T v, std::size_t n) {
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(p)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(p)
         for (std::size_t i = 0; i < n; ++i)
             p[i] = v;
     } else {
@@ -273,9 +274,9 @@ template <typename T> inline void fill(bool gpu, int dev, T *p, T v, std::size_t
     }
 }
 
-template <typename T> inline void copy_d2d(bool gpu, int dev, T *dst, const T *src, std::size_t n) {
+template <typename T> inline void copy_d2d(bool gpu, int dev, int tl, T *dst, const T *src, std::size_t n) {
     if (gpu) {
-#pragma omp target teams distribute parallel for simd device(dev) is_device_ptr(dst, src)
+#pragma omp target teams distribute parallel for simd device(dev) thread_limit(tl) is_device_ptr(dst, src)
         for (std::size_t i = 0; i < n; ++i)
             dst[i] = src[i];
     } else {
@@ -349,7 +350,7 @@ template <typename T> class Buffer {
             return;
         }
 #ifndef OMPNN_HOST_ONLY
-        if (omp_target_memcpy(m_ptr, const_cast<T *>(host), n * sizeof(T), offset * sizeof(T), 0, m_dev,
+        if (omp_target_memcpy(m_ptr, host, n * sizeof(T), offset * sizeof(T), 0, m_dev,
                               omp_get_initial_device()) != 0)
             throw std::runtime_error("ompnn: omp_target_memcpy (host -> device) failed");
 #endif
@@ -444,6 +445,7 @@ template <typename T> class Network {
     bool m_gpu = false;
     int m_dev = -1; ///< omp device number (-1 host)
     BlasKind m_blas = BlasKind::Auto;
+    int m_tl = 256; ///< thread_limit of the target teams (Options::workgroup_size)
 #if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
     std::unique_ptr<vendor::Handle> m_vendor;
 #endif
@@ -506,7 +508,24 @@ template <typename T> void Network<T>::init_device() {
             m_blas = BlasKind::Omp; // no vendor BLAS in this build: pure OpenMP GEMM
 #endif
         if (m_opts.workgroup_size)
-            omp_set_teams_thread_limit(static_cast<int>(m_opts.workgroup_size));
+            m_tl = static_cast<int>(m_opts.workgroup_size);
+#if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
+        // OpenMP device numbers and CUDA/HIP ordinals are assumed to coincide: verify it
+        // on a probe allocation (HIP_VISIBLE_DEVICES vs ROCR_VISIBLE_DEVICES can differ).
+        {
+            void *probe = omp_target_alloc(64, m_dev);
+            if (probe) {
+                cudaPointerAttributes attr{};
+                if (cudaPointerGetAttributes(&attr, probe) == cudaSuccess && attr.device != m_dev) {
+                    omp_target_free(probe, m_dev);
+                    throw std::runtime_error("ompnn: OpenMP device " + std::to_string(m_dev) + " is vendor device " +
+                                             std::to_string(attr.device) + "; set ROCR/CUDA_VISIBLE_DEVICES consistently");
+                }
+                (void)cudaGetLastError();
+                omp_target_free(probe, m_dev);
+            }
+        }
+#endif
     }
     m_prof = Profiler(m_opts.profile);
 }
@@ -514,6 +533,7 @@ template <typename T> void Network<T>::init_device() {
 template <typename T> std::string Network<T>::blas_backend() const {
     switch (m_blas) {
     case BlasKind::Omp: return "omp";
+    case BlasKind::Tiled: return "tiled";
     case BlasKind::Cblas: return OMPNN_BLAS_NAME;
     case BlasKind::Vendor: return compiled_blas_backends().back();
     case BlasKind::Auto:
@@ -617,12 +637,10 @@ void Network<T>::init_parameters(const std::vector<std::vector<T>> *w, const std
         m_vb.emplace_back(n_out, m_dev);
         m_prof.record(Phase::H2D, [&] { m_W[l].copy_in(host_w[l].data(), nw); }, nw * sizeof(T));
         m_prof.record(Phase::H2D, [&] { m_b[l].copy_in(host_b[l].data(), n_out); }, n_out * sizeof(T));
-        m_prof.record(Phase::Other, [&] {
-            kernels::fill(m_gpu, m_dev, m_mW[l].data(), T(0), nw);
-            kernels::fill(m_gpu, m_dev, m_vW[l].data(), T(0), nw);
-            kernels::fill(m_gpu, m_dev, m_mb[l].data(), T(0), n_out);
-            kernels::fill(m_gpu, m_dev, m_vb[l].data(), T(0), n_out);
-        });
+        m_prof.record(Phase::Other, [&] { kernels::fill(m_gpu, m_dev, m_tl, m_mW[l].data(), T(0), nw); });
+        m_prof.record(Phase::Other, [&] { kernels::fill(m_gpu, m_dev, m_tl, m_vW[l].data(), T(0), nw); });
+        m_prof.record(Phase::Other, [&] { kernels::fill(m_gpu, m_dev, m_tl, m_mb[l].data(), T(0), n_out); });
+        m_prof.record(Phase::Other, [&] { kernels::fill(m_gpu, m_dev, m_tl, m_vb[l].data(), T(0), n_out); });
     }
     m_weights_history.clear();
     m_biases_history.clear();
@@ -656,7 +674,7 @@ template <typename T> void Network<T>::ensure_workspace(std::size_t batch) {
             m_gb.emplace_back(n_out, m_dev);
         }
         m_ones = Buf(batch, m_dev);
-        kernels::fill(m_gpu, m_dev, m_ones.data(), T(1), batch);
+        kernels::fill(m_gpu, m_dev, m_tl, m_ones.data(), T(1), batch);
     } catch (...) {
         release_workspace();
         throw;
@@ -727,6 +745,10 @@ void Network<T>::gemm(bool ta, bool tb, int m, int n, int k, T alpha, const T *a
         ompblas::gemm(m_gpu, m_dev, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
         return;
     }
+    if (m_blas == BlasKind::Tiled) {
+        ompblas::gemm_tiled(m_gpu, m_dev, ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
+        return;
+    }
     if (m_gpu) {
 #if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
         m_vendor->gemm(ta, tb, m, n, k, alpha, a, lda, b, ldb, beta, c, ldc);
@@ -740,7 +762,7 @@ void Network<T>::gemm(bool ta, bool tb, int m, int n, int k, T alpha, const T *a
 
 template <typename T>
 void Network<T>::gemv(bool ta, int m, int n, T alpha, const T *a, int lda, const T *x, T beta, T *y) {
-    if (m_blas == BlasKind::Omp) {
+    if (m_blas == BlasKind::Omp || m_blas == BlasKind::Tiled) {
         ompblas::gemv(m_gpu, m_dev, ta, m, n, alpha, a, lda, x, beta, y);
         return;
     }
@@ -756,7 +778,7 @@ void Network<T>::gemv(bool ta, int m, int n, T alpha, const T *a, int lda, const
 }
 
 template <typename T> double Network<T>::asum(int n, const T *x) {
-    if (m_blas == BlasKind::Omp)
+    if (m_blas == BlasKind::Omp || m_blas == BlasKind::Tiled)
         return ompblas::asum(m_gpu, m_dev, n, x);
     if (m_gpu) {
 #if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
@@ -769,7 +791,7 @@ template <typename T> double Network<T>::asum(int n, const T *x) {
 }
 
 template <typename T> double Network<T>::sumsq(int n, const T *x) {
-    if (m_blas == BlasKind::Omp)
+    if (m_blas == BlasKind::Omp || m_blas == BlasKind::Tiled)
         return ompblas::sumsq(m_gpu, m_dev, n, x);
     if (m_gpu) {
 #if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
@@ -799,10 +821,10 @@ template <typename T> void Network<T>::forward_layer(std::size_t l, const T *in,
         if (m_opts.specialized_kernels) {
             dispatch_activation(act, [&](auto tag) {
                 constexpr ActivationType A = decltype(tag)::value;
-                kernels::activate(m_gpu, m_dev, net, out, bias, n, M, ActF<A>{});
+                kernels::activate(m_gpu, m_dev, m_tl, net, out, bias, n, M, ActF<A>{});
             });
         } else {
-            kernels::activate(m_gpu, m_dev, net, out, bias, n, M, ActRT{act});
+            kernels::activate(m_gpu, m_dev, m_tl, net, out, bias, n, M, ActRT{act});
         }
     });
 }
@@ -822,13 +844,13 @@ template <typename T> double Network<T>::output_delta_loss(const T *targets, std
             loss = dispatch_activation(act, [&](auto tag) {
                 constexpr ActivationType A = decltype(tag)::value;
                 if (from_out)
-                    return kernels::output_delta_loss(m_gpu, m_dev, m_opts.loss_reduction, targets, out, net, delta, n,
+                    return kernels::output_delta_loss(m_gpu, m_dev, m_tl, m_opts.loss_reduction, targets, out, net, delta, n,
                                                       DfF<A, true>{});
-                return kernels::output_delta_loss(m_gpu, m_dev, m_opts.loss_reduction, targets, out, net, delta, n,
+                return kernels::output_delta_loss(m_gpu, m_dev, m_tl, m_opts.loss_reduction, targets, out, net, delta, n,
                                                   DfF<A, false>{});
             });
         } else {
-            loss = kernels::output_delta_loss(m_gpu, m_dev, m_opts.loss_reduction, targets, out, net, delta, n,
+            loss = kernels::output_delta_loss(m_gpu, m_dev, m_tl, m_opts.loss_reduction, targets, out, net, delta, n,
                                               DfRT{act, from_out});
         }
     });
@@ -852,12 +874,12 @@ template <typename T> void Network<T>::hidden_delta(std::size_t l, std::size_t B
             dispatch_activation(act, [&](auto tag) {
                 constexpr ActivationType A = decltype(tag)::value;
                 if (from_out)
-                    kernels::hidden_delta(m_gpu, m_dev, delta, out, net, n, DfF<A, true>{});
+                    kernels::hidden_delta(m_gpu, m_dev, m_tl, delta, out, net, n, DfF<A, true>{});
                 else
-                    kernels::hidden_delta(m_gpu, m_dev, delta, out, net, n, DfF<A, false>{});
+                    kernels::hidden_delta(m_gpu, m_dev, m_tl, delta, out, net, n, DfF<A, false>{});
             });
         } else {
-            kernels::hidden_delta(m_gpu, m_dev, delta, out, net, n, DfRT{act, from_out});
+            kernels::hidden_delta(m_gpu, m_dev, m_tl, delta, out, net, n, DfRT{act, from_out});
         }
     });
 }
@@ -874,7 +896,7 @@ template <typename T> void Network<T>::gradients(std::size_t l, const T *in, std
         if (m_opts.bias_gemv)
             gemv(false, int(M), int(B), invB, delta, int(M), m_ones.data(), T(0), gb);
         else
-            kernels::bias_grad(m_gpu, m_dev, delta, gb, M, B);
+            kernels::bias_grad(m_gpu, m_dev, m_tl, delta, gb, M, B);
     });
 }
 
@@ -903,22 +925,20 @@ template <typename T> void Network<T>::update(std::size_t l, unsigned adam_step,
     u.c1 = (adam && u.host_corr) ? T(1) / (T(1) - static_cast<T>(std::pow(static_cast<double>(u.beta1), adam_step))) : T(0);
     u.c2 = (adam && u.host_corr) ? T(1) / (T(1) - static_cast<T>(std::pow(static_cast<double>(u.beta2), adam_step))) : T(0);
     m_prof.record(Phase::Update, [&] {
-        kernels::update(m_gpu, m_dev, m_W[l].data(), m_gW[l].data(), m_mW[l].data(), m_vW[l].data(), m_W[l].size(),
+        kernels::update(m_gpu, m_dev, m_tl, m_W[l].data(), m_gW[l].data(), m_mW[l].data(), m_vW[l].data(), m_W[l].size(),
                         m_b[l].data(), m_gb[l].data(), m_mb[l].data(), m_vb[l].data(), m_b[l].size(), u);
     });
 }
 
 template <typename T> double Network<T>::penalty() {
     double p = 0.0;
-    m_prof.record(Phase::Reg, [&] {
-        for (std::size_t l = 0; l < m_L; ++l) {
-            const int n = int(m_W[l].size());
-            if (m_reg.uses_l1())
-                p += static_cast<double>(m_reg.lambda1) * asum(n, m_W[l].data());
-            if (m_reg.uses_l2())
-                p += 0.5 * static_cast<double>(m_reg.lambda2) * sumsq(n, m_W[l].data());
-        }
-    });
+    for (std::size_t l = 0; l < m_L; ++l) {
+        const int n = int(m_W[l].size());
+        if (m_reg.uses_l1())
+            m_prof.record(Phase::Reg, [&] { p += static_cast<double>(m_reg.lambda1) * asum(n, m_W[l].data()); });
+        if (m_reg.uses_l2())
+            m_prof.record(Phase::Reg, [&] { p += 0.5 * static_cast<double>(m_reg.lambda2) * sumsq(n, m_W[l].data()); });
+    }
     return p;
 }
 
@@ -971,10 +991,8 @@ std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std:
         if (m_opts.shuffle) {
             auto perm = detail::shuffle_permutation(static_cast<std::uint32_t>(N), shuffle_rng);
             m_prof.record(Phase::H2D, [&] { perm_dev.copy_in(perm.data(), N); }, N * sizeof(std::uint32_t));
-            m_prof.record(Phase::Other, [&] {
-                kernels::gather(m_gpu, m_dev, X.data(), Xs.data(), perm_dev.data(), n_in, N * n_in);
-                kernels::gather(m_gpu, m_dev, Y.data(), Ys.data(), perm_dev.data(), n_out, N * n_out);
-            });
+            m_prof.record(Phase::Other, [&] { kernels::gather(m_gpu, m_dev, m_tl, X.data(), Xs.data(), perm_dev.data(), n_in, N * n_in); });
+            m_prof.record(Phase::Other, [&] { kernels::gather(m_gpu, m_dev, m_tl, Y.data(), Ys.data(), perm_dev.data(), n_out, N * n_out); });
             Xsrc = Xs.data();
             Ysrc = Ys.data();
         }
@@ -988,7 +1006,7 @@ std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std:
             const T *targets = Ysrc + start * n_out;
             const T *in = x_batch;
             if (!direct) {
-                m_prof.record(Phase::Other, [&] { kernels::copy_d2d(m_gpu, m_dev, m_act[0].data(), x_batch, cur * n_in); });
+                m_prof.record(Phase::Other, [&] { kernels::copy_d2d(m_gpu, m_dev, m_tl, m_act[0].data(), x_batch, cur * n_in); });
                 in = m_act[0].data();
             }
             for (std::size_t l = 0; l < m_L; ++l)
@@ -1049,7 +1067,7 @@ std::vector<T> Network<T>::predict(const std::vector<T> &input_samples, unsigned
         const std::size_t cur = std::min(B, N - start);
         const T *in = X.data() + start * n_in;
         if (!m_opts.direct_input) {
-            m_prof.record(Phase::Other, [&] { kernels::copy_d2d(m_gpu, m_dev, m_act[0].data(), in, cur * n_in); });
+            m_prof.record(Phase::Other, [&] { kernels::copy_d2d(m_gpu, m_dev, m_tl, m_act[0].data(), in, cur * n_in); });
             in = m_act[0].data();
         }
         for (std::size_t l = 0; l < m_L; ++l)

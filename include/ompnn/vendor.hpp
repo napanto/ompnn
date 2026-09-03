@@ -17,6 +17,9 @@
 #define cudaGetDeviceProperties hipGetDeviceProperties
 #define cudaDriverGetVersion hipDriverGetVersion
 #define cudaRuntimeGetVersion hipRuntimeGetVersion
+#define cudaPointerAttributes hipPointerAttribute_t
+#define cudaPointerGetAttributes hipPointerGetAttributes
+#define cudaGetLastError hipGetLastError
 #define cublasStatus_t hipblasStatus_t
 #define CUBLAS_STATUS_SUCCESS HIPBLAS_STATUS_SUCCESS
 #define cublasHandle_t hipblasHandle_t
