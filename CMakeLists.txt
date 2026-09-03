@@ -222,6 +222,18 @@ if(OMPNN_BUILD_PYTHON)
   # /usr/lib/llvm-18/lib, amdclang++: /opt/rocm/lib/llvm/lib): carry it as rpath
   execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libomp.so
     OUTPUT_VARIABLE _libomp OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(NOT (_libomp AND IS_ABSOLUTE "${_libomp}" AND EXISTS "${_libomp}"))
+    # Ubuntu's clang-18 does not resolve the name: look next to the compiler
+    # (<prefix>/bin/clang++ -> <prefix>/lib/libomptarget.so)
+    get_filename_component(_cxx_real "${CMAKE_CXX_COMPILER}" REALPATH)
+    get_filename_component(_cxx_bin "${_cxx_real}" DIRECTORY)
+    foreach(_cand "${_cxx_bin}/../lib/libomptarget.so" "${_cxx_bin}/../lib/libomp.so")
+      if(EXISTS "${_cand}")
+        get_filename_component(_libomp "${_cand}" REALPATH)
+        break()
+      endif()
+    endforeach()
+  endif()
   if(_libomp AND IS_ABSOLUTE "${_libomp}" AND EXISTS "${_libomp}")
     get_filename_component(_libomp_dir "${_libomp}" DIRECTORY)
     set_target_properties(ompnn_python PROPERTIES INSTALL_RPATH "$ORIGIN;${_libomp_dir}" BUILD_RPATH "$ORIGIN;${_libomp_dir}")
