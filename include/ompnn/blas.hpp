@@ -145,13 +145,15 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
         // one team per C tile, one parallel region per team: the TILE*TILE threads each
         // own a C element and keep the accumulator in a register; the op(A)/op(B) tiles
         // live in the team's low-latency memory (omp_pteam_mem_alloc = shared memory / LDS)
-        T As[TILE][TILE], Bs[TILE][TILE];
+        // op(A) tile stored transposed (AsT[kk][li]): the fast thread index walks consecutive
+        // team-memory words in stores and inner-loop loads (no stride-16 bank conflicts)
+        T AsT[TILE][TILE], Bs[TILE][TILE];
         // clang requires the predefined allocator to be listed in uses_allocators, gcc 14 rejects the clause
         OMPNN_PRAGMA(omp target teams distribute collapse(2) device(dev) is_device_ptr(a, b, c) thread_limit(256)
-                         OMPNN_PTEAM_CLAUSES private(As, Bs) allocate(omp_pteam_mem_alloc : As, Bs))
+                         OMPNN_PTEAM_CLAUSES private(AsT, Bs) allocate(omp_pteam_mem_alloc : AsT, Bs))
         for (int tj = 0; tj < tiles_n; ++tj) {
             for (int ti = 0; ti < tiles_m; ++ti) {
-#pragma omp parallel num_threads(TILE * TILE) shared(As, Bs)
+#pragma omp parallel num_threads(TILE * TILE) shared(AsT, Bs)
                 {
                     const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
                     if (nt == TILE * TILE) {
@@ -161,12 +163,12 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
                         T acc = T(0);
                         for (int t = 0; t < k; t += TILE) {
                             int p = t + lj;
-                            As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                            AsT[lj][li] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
                             p = t + li;
                             Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
 #pragma omp barrier
                             for (int kk = 0; kk < TILE; ++kk)
-                                acc += As[li][kk] * Bs[kk][lj];
+                                acc += AsT[kk][li] * Bs[kk][lj];
 #pragma omp barrier
                         }
                         if (i < m && j < n) {
@@ -184,17 +186,15 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
                                 const int li = e % TILE, lj = e / TILE;
                                 const int i = ti * TILE + li, j = tj * TILE + lj;
                                 int p = t + lj;
-                                As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                                AsT[lj][li] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
                                 p = t + li;
                                 Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
                             }
 #pragma omp barrier
                             for (int e = tid, r = 0; e < TILE * TILE; e += nt, ++r) {
                                 const int li = e % TILE, lj = e / TILE;
-                                T s = T(0);
                                 for (int kk = 0; kk < TILE; ++kk)
-                                    s += As[li][kk] * Bs[kk][lj];
-                                acc[r] += s;
+                                    acc[r] += AsT[kk][li] * Bs[kk][lj];
                             }
 #pragma omp barrier
                         }
@@ -215,23 +215,24 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
 #pragma omp parallel for collapse(2)
         for (int tj = 0; tj < tiles_n; ++tj) {
             for (int ti = 0; ti < tiles_m; ++ti) {
-                T As[TILE][TILE], BsT[TILE][TILE], Cs[TILE][TILE] = {};
+                // AsT[kk][li] / Bs[kk][lj] like the device kernel; the li loop is the simd
+                // dimension (16 consecutive rows of C), the kk accumulation stays sequential
+                T AsT[TILE][TILE], Bs[TILE][TILE], Cs[TILE][TILE] = {};
                 for (int t = 0; t < k; t += TILE) {
                     for (int lj = 0; lj < TILE; ++lj)
                         for (int li = 0; li < TILE; ++li) {
                             const int i = ti * TILE + li, j = tj * TILE + lj;
                             int p = t + lj;
-                            As[li][lj] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
+                            AsT[lj][li] = (i < m && p < k) ? (ta ? a[p + std::size_t(i) * lda] : a[i + std::size_t(p) * lda]) : T(0);
                             p = t + li;
-                            BsT[lj][li] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
+                            Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
                         }
                     for (int lj = 0; lj < TILE; ++lj)
-                        for (int li = 0; li < TILE; ++li) {
-                            T acc = Cs[li][lj];
-#pragma omp simd reduction(+ : acc)
-                            for (int kk = 0; kk < TILE; ++kk)
-                                acc += As[li][kk] * BsT[lj][kk];
-                            Cs[li][lj] = acc;
+                        for (int kk = 0; kk < TILE; ++kk) {
+                            const T bkj = Bs[kk][lj];
+#pragma omp simd
+                            for (int li = 0; li < TILE; ++li)
+                                Cs[li][lj] += AsT[kk][li] * bkj;
                         }
                 }
                 for (int lj = 0; lj < TILE; ++lj)
