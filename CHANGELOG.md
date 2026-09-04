@@ -37,6 +37,8 @@ layout and numerics.
 - The OpenMP device number is checked against the CUDA/HIP ordinal of a probe
   allocation at construction (`HIP_VISIBLE_DEVICES` and `ROCR_VISIBLE_DEVICES`
   can disagree); mismatch raises.
+- `Options.sync_every` accepted for parity (every target operation is already
+  synchronous, so it has no effect).
 - Known numerical differences vs syclnn (within the parity tolerances):
   `sumsq` accumulates in double, the host tiled GEMM reassociates the 16-term
   partial sums (`simd reduction`), and gcc offload builds run the `omp atomic`
