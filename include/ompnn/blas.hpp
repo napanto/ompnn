@@ -147,13 +147,13 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
         // live in the team's low-latency memory (omp_pteam_mem_alloc = shared memory / LDS)
         // op(A) tile stored transposed (AsT[kk][li]): the fast thread index walks consecutive
         // team-memory words in stores and inner-loop loads (no stride-16 bank conflicts)
-        T AsT[TILE][TILE], Bs[TILE][TILE];
+        T AsT[TILE][TILE], Bs[TILE][TILE], Cs[TILE][TILE];
         // clang requires the predefined allocator to be listed in uses_allocators, gcc 14 rejects the clause
         OMPNN_PRAGMA(omp target teams distribute collapse(2) device(dev) is_device_ptr(a, b, c) thread_limit(256)
-                         OMPNN_PTEAM_CLAUSES private(AsT, Bs) allocate(omp_pteam_mem_alloc : AsT, Bs))
+                         OMPNN_PTEAM_CLAUSES private(AsT, Bs, Cs) allocate(omp_pteam_mem_alloc : AsT, Bs, Cs))
         for (int tj = 0; tj < tiles_n; ++tj) {
             for (int ti = 0; ti < tiles_m; ++ti) {
-#pragma omp parallel num_threads(TILE * TILE) shared(AsT, Bs)
+#pragma omp parallel num_threads(TILE * TILE) shared(AsT, Bs, Cs)
                 {
                     const int tid = omp_get_thread_num(), nt = omp_get_num_threads();
                     if (nt == TILE * TILE) {
@@ -176,11 +176,12 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
                             *cc = (beta == T(0)) ? alpha * acc : alpha * acc + beta * (*cc);
                         }
                     } else {
-                        // fewer threads than tile elements (gcc maps a thread to a wavefront and
-                        // clamps the team to 16 of them): each thread strides over the elements
-                        T acc[TILE * TILE];
-                        for (int r = 0; r < TILE * TILE; ++r)
-                            acc[r] = T(0);
+                        // fewer threads than tile elements (gcc maps a thread to a warp/wavefront
+                        // and gives a team 8-16 of them): each thread strides over the elements and
+                        // accumulates into a C tile in team memory (no large private array: with a
+                        // 256-element private accumulator the double kernel failed to load on nvptx)
+                        for (int e = tid; e < TILE * TILE; e += nt)
+                            Cs[e % TILE][e / TILE] = T(0);
                         for (int t = 0; t < k; t += TILE) {
                             for (int e = tid; e < TILE * TILE; e += nt) {
                                 const int li = e % TILE, lj = e / TILE;
@@ -191,19 +192,21 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
                                 Bs[li][lj] = (p < k && j < n) ? (tb ? b[j + std::size_t(p) * ldb] : b[p + std::size_t(j) * ldb]) : T(0);
                             }
 #pragma omp barrier
-                            for (int e = tid, r = 0; e < TILE * TILE; e += nt, ++r) {
+                            for (int e = tid; e < TILE * TILE; e += nt) {
                                 const int li = e % TILE, lj = e / TILE;
+                                T acc = Cs[li][lj];
                                 for (int kk = 0; kk < TILE; ++kk)
-                                    acc[r] += AsT[kk][li] * Bs[kk][lj];
+                                    acc += AsT[kk][li] * Bs[kk][lj];
+                                Cs[li][lj] = acc;
                             }
 #pragma omp barrier
                         }
-                        for (int e = tid, r = 0; e < TILE * TILE; e += nt, ++r) {
+                        for (int e = tid; e < TILE * TILE; e += nt) {
                             const int li = e % TILE, lj = e / TILE;
                             const int i = ti * TILE + li, j = tj * TILE + lj;
                             if (i < m && j < n) {
                                 T *cc = c + i + std::size_t(j) * ldc;
-                                *cc = (beta == T(0)) ? alpha * acc[r] : alpha * acc[r] + beta * (*cc);
+                                *cc = (beta == T(0)) ? alpha * Cs[li][lj] : alpha * Cs[li][lj] + beta * (*cc);
                             }
                         }
                     }
