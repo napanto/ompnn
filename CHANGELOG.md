@@ -39,6 +39,8 @@ layout and numerics.
   can disagree); mismatch raises.
 - `Options.sync_every` accepted for parity (every target operation is already
   synchronous, so it has no effect).
+- `Options.sync_ops` accepted for parity; always reported `true` (every target
+  region and vendor BLAS call is synchronous).
 - Known numerical differences vs syclnn (within the parity tolerances):
   `sumsq` accumulates in double, the host tiled GEMM reassociates the 16-term
   partial sums (`simd reduction`), and gcc offload builds run the `omp atomic`

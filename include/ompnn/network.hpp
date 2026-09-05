@@ -527,6 +527,7 @@ template <typename T> void Network<T>::init_device() {
         }
 #endif
     }
+    m_opts.sync_ops = true; // every target region and BLAS call is synchronous here
     m_prof = Profiler(m_opts.profile);
 }
 
