@@ -145,7 +145,13 @@ if(OMPNN_BLAS STREQUAL "openblas")
   endif()
   target_include_directories(ompnn_backend INTERFACE ${OMPNN_CBLAS_INCLUDE})
   target_link_libraries(ompnn_backend INTERFACE ${OMPNN_CBLAS_LIB})
-  set(OMPNN_BLAS_STRING "OpenBLAS ${OMPNN_CBLAS_LIB}")
+  # The soname (libopenblas.so.0) is resolved at run time; without an rpath to the variant's
+  # own directory the loader follows the distro alternatives symlink and silently loads the
+  # pthread build even when OMPNN_BLAS_ROOT pointed at the OpenMP one (two thread pools then
+  # contend: 1.5x slower on the 16-core host).
+  get_filename_component(_cblas_real "${OMPNN_CBLAS_LIB}" REALPATH)
+  get_filename_component(OMPNN_CBLAS_DIR "${_cblas_real}" DIRECTORY)
+  set(OMPNN_BLAS_STRING "OpenBLAS ${_cblas_real}")
 elseif(OMPNN_BLAS STREQUAL "mkl")
   set(_mkl_root "${OMPNN_BLAS_ROOT}")
   if(NOT _mkl_root AND DEFINED ENV{MKLROOT})
@@ -218,6 +224,12 @@ if(OMPNN_BUILD_PYTHON)
     VISIBILITY_INLINES_HIDDEN ON
     BUILD_RPATH "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
+  set(_rpath "$ORIGIN")
+  if(OMPNN_CBLAS_DIR)
+    set(_rpath "${_rpath};${OMPNN_CBLAS_DIR}")
+    set_target_properties(ompnn_python PROPERTIES INSTALL_RPATH "${_rpath}" BUILD_RPATH "${_rpath}")
+    message(STATUS "ompnn: CBLAS rpath ${OMPNN_CBLAS_DIR}")
+  endif()
   # LLVM-based compilers keep their OpenMP runtime next to the compiler (clang-18:
   # /usr/lib/llvm-18/lib, amdclang++: /opt/rocm/lib/llvm/lib): carry it as rpath
   # The compiler's own lib dir first (<prefix>/bin/clang++ -> <prefix>/lib): with
@@ -238,7 +250,7 @@ if(OMPNN_BUILD_PYTHON)
   endif()
   if(_libomp AND IS_ABSOLUTE "${_libomp}" AND EXISTS "${_libomp}")
     get_filename_component(_libomp_dir "${_libomp}" DIRECTORY)
-    set_target_properties(ompnn_python PROPERTIES INSTALL_RPATH "$ORIGIN;${_libomp_dir}" BUILD_RPATH "$ORIGIN;${_libomp_dir}")
+    set_target_properties(ompnn_python PROPERTIES INSTALL_RPATH "${_rpath};${_libomp_dir}" BUILD_RPATH "${_rpath};${_libomp_dir}")
     message(STATUS "ompnn: OpenMP runtime rpath ${_libomp_dir}")
   endif()
   if(SKBUILD_PROJECT_NAME)
