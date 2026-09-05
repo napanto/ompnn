@@ -46,6 +46,10 @@ layout and numerics.
   partial sums (`simd reduction`), and gcc offload builds run the `omp atomic`
   loss and the serial bias gradient at one lane per wavefront (those two
   ablation rows are not compared with SYCL/CUDA).
+- Build: the Python module carries an rpath to the directory of the CBLAS it was
+  configured with. `libopenblas.so.0` used to resolve through the distro
+  alternatives symlink to the pthread build even when `OMPNN_BLAS_ROOT` named the
+  OpenMP one; the two thread pools contend (1.5x slower on a 16-core host).
 - Build: `OMPNN_TARGET=cpu|nvidia|amd`, `OMPNN_OFFLOAD_ARCH`, `OMPNN_BLAS`,
   per-compiler offload flags (clang `-fopenmp-targets`/`--offload-arch`, gcc
   `-foffload`, nvc++ `-mp=gpu`), `build_info()` with compiler / flags / target /
