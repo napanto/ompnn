@@ -1,5 +1,7 @@
 # Changelog
 
+All notable changes to ompnn. The project follows [Semantic Versioning](https://semver.org).
+
 ## [0.1.0] - 2026-09
 
 First release: OpenMP translation of syclnn 0.2.0 with the same public API, file
