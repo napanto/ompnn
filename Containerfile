@@ -5,14 +5,14 @@
 #   podman run --rm -it --device nvidia.com/gpu=all --security-opt=label=disable ompnn /opt/venvs/clang18/bin/pytest --device gpu
 ARG BASE=ghcr.io/napanto/fnn-cuda:latest
 FROM ${BASE}
-ARG FNN_IMAGE=ompnn:latest
-ARG FNN_IMAGE_BUILT=unknown
+ARG IMAGE_NAME=ompnn:latest
+ARG IMAGE_BUILT=unknown
 
 ENV CMAKE_BUILD_PARALLEL_LEVEL=8 OMPNN_BLAS_ROOT=/opt/openblas-openmp
 COPY . /opt/src/ompnn
 # identity of this image (the base keeps its own stamp in the layer history)
-ENV FNN_IMAGE=${FNN_IMAGE} FNN_IMAGE_BUILT=${FNN_IMAGE_BUILT}
-LABEL org.opencontainers.image.source=https://github.com/napanto/ompnn fnn.image="${FNN_IMAGE}" fnn.image.built="${FNN_IMAGE_BUILT}"
+ENV FNN_IMAGE=${IMAGE_NAME} FNN_IMAGE_BUILT=${IMAGE_BUILT}
+LABEL org.opencontainers.image.source=https://github.com/napanto/ompnn fnn.image="${IMAGE_NAME}" fnn.image.built="${IMAGE_BUILT}"
 WORKDIR /opt/src/ompnn
 
 # gcc-14: host + nvptx offload; clang-22: host; clang-18: host + nvptx offload
