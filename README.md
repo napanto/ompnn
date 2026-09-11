@@ -45,6 +45,23 @@ without an OpenMP counterpart (`queue`, `streams`, `fine_deps`, `join_kernels`,
 `pinned_host`, `memory` other than `device`) are ignored or rejected.
 `workgroup_size` sets `omp_set_teams_thread_limit`.
 
+## Run the published image
+
+`ghcr.io/napanto/ompnn` is the library installed in the `fnn-cuda` toolchain image, built by CI from
+the `Containerfile` on every push, in three virtual environments, one per compiler:
+`/opt/venvs/gcc14` (host + nvptx offload), `/opt/venvs/clang18` (host + nvptx offload) and
+`/opt/venvs/clang22` (host). One command:
+
+```sh
+# CPU only (any x86-64 host with a container runtime):
+podman run --rm -it ghcr.io/napanto/ompnn /opt/venvs/clang22/bin/python -c "import ompnn; print(ompnn.devices())"
+# with an NVIDIA GPU (driver >= 525 and the NVIDIA container toolkit's CDI spec on the host):
+podman run --rm -it --device nvidia.com/gpu=all ghcr.io/napanto/ompnn /opt/venvs/clang18/bin/python -c "import ompnn; print(ompnn.devices())"
+```
+
+The AMD builds (amdclang++, gcc-14 amdgcn) are made from the `fnn-rocm` toolchain image
+(`fnn-bench/containers`) and are not published as a library image.
+
 ## Building
 
 ```sh
