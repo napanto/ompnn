@@ -59,8 +59,16 @@ podman run --rm -it ghcr.io/napanto/ompnn /opt/venvs/clang22/bin/python -c "impo
 podman run --rm -it --device nvidia.com/gpu=all ghcr.io/napanto/ompnn /opt/venvs/clang18/bin/python -c "import ompnn; print(ompnn.devices())"
 ```
 
-The AMD builds (amdclang++, gcc-14 amdgcn) are made from the `fnn-rocm` toolchain image
-(`fnn-bench/containers`) and are not published as a library image.
+On an AMD GPU (ROCm 7.2 driver on the host) the `rocm` tag holds the two offload builds of the study
+in `/opt/venvs/amdclang` (amdclang++, ROCm's LLVM) and `/opt/venvs/gcc14amd` (gcc-14 amdgcn):
+
+```sh
+podman run --rm -it --device /dev/kfd --device /dev/dri --group-add keep-groups ghcr.io/napanto/ompnn:rocm /opt/venvs/amdclang/bin/python -c "import ompnn; print(ompnn.devices())"
+```
+
+The AMD tag is built from the same `Containerfile` on the `fnn-rocm` base by
+`fnn-bench/scripts/publish-amd-variants.sh` (GitHub's runners cannot hold that base), so it is
+refreshed by hand, not on every push.
 
 ## Building
 
