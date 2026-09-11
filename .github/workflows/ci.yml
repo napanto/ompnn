@@ -46,3 +46,22 @@ jobs:
           export CXX=${{ matrix.cxx }} OMPNN_TARGET=nvidia OMPNN_OFFLOAD_ARCH="sm_61;sm_80" OMPNN_BLAS_ROOT=/opt/openblas-openmp CMAKE_BUILD_PARALLEL_LEVEL=4
           pip install -v .
           python -c "import ompnn; print(ompnn.build_info()); print(ompnn.devices())"
+
+  image:
+    name: container image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    needs: [cpu, offload-compile]
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: redhat-actions/podman-login@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: |
+          podman build -t ghcr.io/napanto/ompnn:latest -f Containerfile .
+          podman push ghcr.io/napanto/ompnn:latest
