@@ -410,6 +410,12 @@ template <typename T> class Network {
     std::vector<T> train(const std::vector<T> &input_samples, const std::vector<T> &target_samples, unsigned num_samples,
                          unsigned batch_size, unsigned max_epochs);
     std::vector<T> predict(const std::vector<T> &input_samples, unsigned num_samples, unsigned batch_size = 0);
+    /// train() on raw buffers: num_samples x n_in inputs and num_samples x n_out targets, sample-major,
+    /// read in place (no copy); the caller guarantees the sizes.
+    std::vector<T> train(const T *input_samples, const T *target_samples, unsigned num_samples, unsigned batch_size,
+                         unsigned max_epochs);
+    /// predict() on a raw buffer of num_samples x n_in values, read in place (no copy).
+    std::vector<T> predict(const T *input_samples, unsigned num_samples, unsigned batch_size = 0);
 
     std::pair<history_t, history_t> weights_biases() const { return {m_weights_history, m_biases_history}; }
     std::vector<std::vector<T>> weights() const;
@@ -946,7 +952,7 @@ template <typename T> double Network<T>::penalty() {
 // ---------------------------------------------------------------- training
 
 template <typename T>
-std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std::vector<T> &target_samples,
+std::vector<T> Network<T>::train(const T *input_samples, const T *target_samples,
                                  unsigned num_samples, unsigned batch_size, unsigned max_epochs) {
     const auto t_start = Profiler::clock::now();
     const std::size_t n_in = m_layers.front().neurons, n_out = m_layers.back().neurons;
@@ -956,12 +962,6 @@ std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std:
         throw std::invalid_argument("ompnn: batch size must be greater than 0");
     if (max_epochs == 0)
         throw std::invalid_argument("ompnn: max_epochs must be greater than 0");
-    if (input_samples.size() != std::size_t(num_samples) * n_in)
-        throw std::invalid_argument("ompnn: input has " + std::to_string(input_samples.size()) + " values, expected " +
-                                    std::to_string(std::size_t(num_samples) * n_in));
-    if (target_samples.size() != std::size_t(num_samples) * n_out)
-        throw std::invalid_argument("ompnn: targets have " + std::to_string(target_samples.size()) + " values, expected " +
-                                    std::to_string(std::size_t(num_samples) * n_out));
     const std::size_t N = num_samples;
     const std::size_t B = std::min<std::size_t>(batch_size, N);
     const std::size_t n_batches = (N + B - 1) / B;
@@ -974,8 +974,8 @@ std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std:
     // ---- dataset upload (once) ----
     Buf X(N * n_in, m_dev), Y(N * n_out, m_dev), Xs, Ys;
     detail::Buffer<std::uint32_t> perm_dev;
-    m_prof.record(Phase::H2D, [&] { X.copy_in(input_samples.data(), N * n_in); }, N * n_in * sizeof(T));
-    m_prof.record(Phase::H2D, [&] { Y.copy_in(target_samples.data(), N * n_out); }, N * n_out * sizeof(T));
+    m_prof.record(Phase::H2D, [&] { X.copy_in(input_samples, N * n_in); }, N * n_in * sizeof(T));
+    m_prof.record(Phase::H2D, [&] { Y.copy_in(target_samples, N * n_out); }, N * n_out * sizeof(T));
     if (m_opts.shuffle) {
         Xs = Buf(N * n_in, m_dev);
         Ys = Buf(N * n_out, m_dev);
@@ -1048,19 +1048,16 @@ std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std:
 // ---------------------------------------------------------------- inference
 
 template <typename T>
-std::vector<T> Network<T>::predict(const std::vector<T> &input_samples, unsigned num_samples, unsigned batch_size) {
+std::vector<T> Network<T>::predict(const T *input_samples, unsigned num_samples, unsigned batch_size) {
     const auto t_start = Profiler::clock::now();
     const std::size_t n_in = m_layers.front().neurons, n_out = m_layers.back().neurons;
     if (num_samples == 0)
         return {};
-    if (input_samples.size() != std::size_t(num_samples) * n_in)
-        throw std::invalid_argument("ompnn: predict input has " + std::to_string(input_samples.size()) + " values, expected " +
-                                    std::to_string(std::size_t(num_samples) * n_in));
     const std::size_t N = num_samples;
     const std::size_t B = (batch_size == 0) ? N : std::min<std::size_t>(batch_size, N);
     ensure_workspace(B);
     Buf X(N * n_in, m_dev);
-    m_prof.record(Phase::H2D, [&] { X.copy_in(input_samples.data(), N * n_in); }, N * n_in * sizeof(T));
+    m_prof.record(Phase::H2D, [&] { X.copy_in(input_samples, N * n_in); }, N * n_in * sizeof(T));
     std::vector<T> out(N * n_out);
     for (std::size_t start = 0; start < N; start += B) {
         const std::size_t cur = std::min(B, N - start);
@@ -1076,8 +1073,34 @@ std::vector<T> Network<T>::predict(const std::vector<T> &input_samples, unsigned
     }
     if (!m_opts.persistent_workspace)
         release_workspace();
-    m_prof.profile().wall_ns += Profiler::elapsed_ns(t_start);
+    {
+        const auto ns = Profiler::elapsed_ns(t_start);
+        m_prof.profile().wall_ns += ns;
+        m_prof.profile().predict_wall_ns.push_back(ns);
+    }
     return out;
+}
+
+template <typename T>
+std::vector<T> Network<T>::train(const std::vector<T> &input_samples, const std::vector<T> &target_samples,
+                                 unsigned num_samples, unsigned batch_size, unsigned max_epochs) {
+    const std::size_t n_in = m_layers.front().neurons, n_out = m_layers.back().neurons;
+    if (num_samples != 0 && input_samples.size() != std::size_t(num_samples) * n_in)
+        throw std::invalid_argument("ompnn: input has " + std::to_string(input_samples.size()) + " values, expected " +
+                                    std::to_string(std::size_t(num_samples) * n_in));
+    if (num_samples != 0 && target_samples.size() != std::size_t(num_samples) * n_out)
+        throw std::invalid_argument("ompnn: targets have " + std::to_string(target_samples.size()) + " values, expected " +
+                                    std::to_string(std::size_t(num_samples) * n_out));
+    return train(input_samples.data(), target_samples.data(), num_samples, batch_size, max_epochs);
+}
+
+template <typename T>
+std::vector<T> Network<T>::predict(const std::vector<T> &input_samples, unsigned num_samples, unsigned batch_size) {
+    const std::size_t n_in = m_layers.front().neurons;
+    if (num_samples != 0 && input_samples.size() != std::size_t(num_samples) * n_in)
+        throw std::invalid_argument("ompnn: predict input has " + std::to_string(input_samples.size()) + " values, expected " +
+                                    std::to_string(std::size_t(num_samples) * n_in));
+    return predict(input_samples.data(), num_samples, batch_size);
 }
 
 } // namespace ompnn

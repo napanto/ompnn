@@ -132,10 +132,14 @@ inline void gemm(bool gpu, int dev, bool ta, bool tb, int m, int n, int k, T alp
 constexpr int TILE = 16;
 #define OMPNN_PRAGMA_(x) _Pragma(#x)
 #define OMPNN_PRAGMA(x) OMPNN_PRAGMA_(x)
-#if defined(__clang__)
-#define OMPNN_PTEAM_CLAUSES uses_allocators(omp_pteam_mem_alloc)
+// nvc++ rejects the allocate(omp_pteam_mem_alloc : ...) clause but already places team-private
+// arrays in CUDA shared memory ("Team private ... located in CUDA shared memory", -Minfo=mp)
+#if defined(__NVCOMPILER)
+#define OMPNN_PTEAM_CLAUSES private(AsT, Bs, Cs)
+#elif defined(__clang__)
+#define OMPNN_PTEAM_CLAUSES uses_allocators(omp_pteam_mem_alloc) private(AsT, Bs, Cs) allocate(omp_pteam_mem_alloc : AsT, Bs, Cs)
 #else
-#define OMPNN_PTEAM_CLAUSES
+#define OMPNN_PTEAM_CLAUSES private(AsT, Bs, Cs) allocate(omp_pteam_mem_alloc : AsT, Bs, Cs)
 #endif
 template <typename T>
 inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k, T alpha, const T *a, int lda, const T *b,
@@ -148,9 +152,10 @@ inline void gemm_tiled(bool gpu, int dev, bool ta, bool tb, int m, int n, int k,
         // op(A) tile stored transposed (AsT[kk][li]): the fast thread index walks consecutive
         // team-memory words in stores and inner-loop loads (no stride-16 bank conflicts)
         T AsT[TILE][TILE], Bs[TILE][TILE], Cs[TILE][TILE];
-        // clang requires the predefined allocator to be listed in uses_allocators, gcc 14 rejects the clause
+        // clang requires the predefined allocator to be listed in uses_allocators, gcc 14 rejects
+        // that clause, nvc++ rejects allocate(): the per-compiler clause set is OMPNN_PTEAM_CLAUSES
         OMPNN_PRAGMA(omp target teams distribute collapse(2) device(dev) is_device_ptr(a, b, c) thread_limit(256)
-                         OMPNN_PTEAM_CLAUSES private(AsT, Bs, Cs) allocate(omp_pteam_mem_alloc : AsT, Bs, Cs))
+                         OMPNN_PTEAM_CLAUSES)
         for (int tj = 0; tj < tiles_n; ++tj) {
             for (int ti = 0; ti < tiles_m; ++ti) {
 #pragma omp parallel num_threads(TILE * TILE) shared(AsT, Bs, Cs)
