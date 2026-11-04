@@ -164,7 +164,7 @@ template <typename T> struct UpdateParams {
 
 #pragma omp declare target
 template <typename T> inline void step_fn(T &p, T grad, T reg_grad, T &m, T &v, const UpdateParams<T> &u) {
-    const T g = grad - reg_grad; // ascent direction of (t - o)
+    const T g = grad - reg_grad; // descent direction of the regularised loss (grad accumulates (t - o))
     T step;
     switch (u.strategy) {
     case 0: // Constant
