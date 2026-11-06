@@ -39,6 +39,7 @@ print(ompnn.build_info())   # compiler, target, offload arch, CBLAS, OpenMP vers
 The API is that of syclnn 0.2 (`Network_double` / `Network_float`, the `*_double`
 / `*_float` configuration classes, `Options`, `devices()`, `build_info()`).
 `Options.device`: `cpu`/`host`, `gpu`, `index:N`, `omp:N`, or a name substring.
+`Options.wait`: `auto` keeps the runtime's wait policy, `spin` makes the host spin on the NVIDIA context (before the first offload).
 `Options.blas`: `auto` (CBLAS on the host, vendor BLAS on the GPU), `omp`,
 `openblas`/`mkl` (must match the linked one), `cublas`/`rocblas`. Switches
 without an OpenMP counterpart (`queue`, `streams`, `fine_deps`, `join_kernels`,

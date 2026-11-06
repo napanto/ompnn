@@ -357,6 +357,7 @@ PYBIND11_MODULE(OMPNN_MODULE_NAME, m) {
                     .def_readwrite("fast_math", &Options::fast_math)
                     .def_readwrite("sync_every", &Options::sync_every)
                     .def_readwrite("blas_queue", &Options::blas_queue)
+                    .def_readwrite("wait", &Options::wait)
                     .def_readwrite("sync_ops", &Options::sync_ops);
     // memory / queue accept the enum or its lower-case name
     opts.def_property(

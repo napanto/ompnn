@@ -27,6 +27,14 @@ def test_cpu_and_omp_blas_agree():
     np.testing.assert_allclose(la, lb, rtol=1e-12)
 
 
+def test_wait_policy_is_validated_and_reported():
+    layers = [ompnn.LayerDescription(2), ompnn.LayerDescription(1, ompnn.ActivationType.Tanh)]
+    net = ompnn.Network(layers, 0.1, seed=1, device="cpu", wait="spin")
+    assert net.options.wait in ("auto", "spin")
+    with pytest.raises(ValueError):
+        ompnn.Network(layers, 0.1, seed=1, device="cpu", wait="yield")
+
+
 def test_wrong_blas_rejected():
     layers = [ompnn.LayerDescription(2), ompnn.LayerDescription(1, ompnn.ActivationType.Tanh)]
     linked = ompnn.build_info()["cblas"]

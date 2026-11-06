@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.26)
 
-project(ompnn VERSION 0.1.1 LANGUAGES CXX)
+project(ompnn VERSION 0.1.2 LANGUAGES CXX)
 
 # ompnn: OpenMP port of syclnn.  The same sources build for three targets:
 #   OMPNN_TARGET=cpu     host OpenMP only (gcc, clang, nvc++, icpx, ...)

@@ -495,6 +495,14 @@ template <typename T> class Network {
 ============================================================================ */
 
 template <typename T> void Network<T>::init_device() {
+    if (m_opts.wait != "auto" && m_opts.wait != "spin")
+        throw std::invalid_argument("ompnn: Options::wait must be auto or spin");
+#if defined(OMPNN_TARGET_NVIDIA) || defined(OMPNN_TARGET_AMD)
+    if (m_opts.wait == "spin" && !vendor::spin_wait()) // before select_device: that starts the OpenMP runtime
+        m_opts.wait = "auto";
+#else
+    m_opts.wait = "auto";
+#endif
     m_info = select_device(m_opts.device);
     m_gpu = m_info.omp_device >= 0;
     m_dev = m_info.omp_device;

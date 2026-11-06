@@ -2,6 +2,15 @@
 
 All notable changes to ompnn. The project follows [Semantic Versioning](https://semver.org).
 
+## [0.1.2] - 2026-11-06
+
+### Added
+
+- `Options::wait`: `auto` keeps the wait policy of the OpenMP runtime, `spin` makes the host spin on the
+  NVIDIA primary context. clang's libomptarget otherwise sets `CU_CTX_SCHED_BLOCKING_SYNC`, and with one wait per
+  operation that policy dominates a short-kernel epoch. `spin` takes effect only before the first offload of
+  the process; `Network::options()` reports `auto` when it could not be applied.
+
 ## [0.1.1] - 2026-09-17
 
 ### Changed

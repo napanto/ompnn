@@ -316,6 +316,24 @@ inline void sync(const char *what) {
     if (cudaDeviceSynchronize() != cudaSuccess)
         throw std::runtime_error(std::string("ompnn: device synchronisation after ") + what + " failed");
 }
+/// Make the primary contexts spin on waits; false if one already exists with another policy. It must run
+/// before the OpenMP runtime first touches a device: libomptarget keeps the flags of an active context.
+inline bool spin_wait() {
+#if defined(OMPNN_TARGET_NVIDIA)
+    int count = 0;
+    if (cudaGetDeviceCount(&count) != cudaSuccess)
+        return false;
+    for (int dev = 0; dev < count; ++dev) {
+        void *probe = nullptr;
+        if (cudaSetDevice(dev) != cudaSuccess || cudaSetDeviceFlags(cudaDeviceScheduleSpin) != cudaSuccess ||
+            cudaMalloc(&probe, 16) != cudaSuccess || cudaFree(probe) != cudaSuccess)
+            return false;
+    }
+    return count > 0;
+#else
+    return false;
+#endif
+}
 class Handle {
   public:
     explicit Handle(int dev) {
